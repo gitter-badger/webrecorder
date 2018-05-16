@@ -59,6 +59,12 @@ class Migration(object):
 
         user.remove_collection(collection)
 
+    def migrate_all(self):
+        all_users = self.old_redis.hkeys('h:users')
+        print('NUM USERS:', len(all_users))
+        for user in all_users:
+            self.migrate_user(user)
+
     def migrate_user(self, username, new_username=None, coll_name=None):
         new_username = new_username or username
         print('Processing User: {0} -> {1}'.format(username, new_username))
@@ -198,13 +204,13 @@ class Migration(object):
                                                               public=True))
         # create bookmarks for visible pages
         for page in visible_pages:
-            page['rec'] = recording.my_id
-            page['id'] = collection._new_page_id(page)
+            #page['rec'] = recording.my_id
+            page['page_id'] = collection._new_page_id(page)
 
             print('    BOOKMARK: ' + page.get('timestamp', '') + ' ' + page.get('url', ''))
 
-            bookmark = recording_list.create_bookmark(page)
-            bookmarks = collection.bookmarks_list.create_bookmark(page)
+            bookmark_1 = recording_list.create_bookmark(page)
+            bookmark_2 = collection.bookmarks_list.create_bookmark(page)
 
         return recording
 
@@ -257,14 +263,17 @@ class Migration(object):
 # ============================================================================
 def main(overwrite=False):
     m = Migration(old_redis_url=os.environ['REDIS_MIGRATE_URL'],
-                  new_redis_url='redis://redis:6379/1',
+                  new_redis_url=os.environ.get('NEW_REDIS_URL', 'redis://redis:6379/1'),
                   dry_run=False)
 
     if overwrite:
         m.delete_coll(sys.argv[1], sys.argv[2])
 
-    m.migrate_user(username=sys.argv[1],
-                   coll_name=sys.argv[2])
+    #if sys.argv[1] == '*':
+    m.migrate_all()
+
+    #m.migrate_user(username=sys.argv[1],
+    #               coll_name=sys.argv[2])
 
 
 # ============================================================================
