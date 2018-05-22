@@ -106,9 +106,15 @@ class Migration(object):
         else:
             colls = [coll_name]
 
+        total_size = 0
+
         for coll in colls:
             print('  Processing Collection: ' + coll)
-            self.migrate_collection(user, username, coll)
+            total_size += self.migrate_collection(user, username, coll)
+
+
+        if not coll_name:
+            user.set_prop('size', total_size)
 
         try:
             target_dirname = user.get_user_temp_warc_path()
@@ -124,7 +130,7 @@ class Migration(object):
 
         if not old_coll_data or not old_coll_data.get('id'):
             print('  SKIPPING INVALID: ' + old_coll)
-            return
+            return 0
 
         collection = user.create_collection(old_coll,
                                             allow_dupe=False,
@@ -135,11 +141,11 @@ class Migration(object):
         print('  New Collection Created: ' + collection.my_id)
 
         if old_coll_data.get('created_at'):
-            collection.set_prop('created_at', old_coll_data.get('created_at'))
+            collection.set_prop('created_at', old_coll_data.get('created_at'), update_ts=False)
         else:
             print('  OBJ ERR: created_at missing')
 
-        collection.set_prop('size', old_coll_data.get('size', '0'))
+        #collection.set_prop('size', old_coll_data.get('size', '0'))
 
         collection.bookmarks_list = None
 
@@ -147,10 +153,14 @@ class Migration(object):
 
         patch_recordings = {}
 
+        total_size = 0
+
         for rec in recs:
             old_rec_base_key = 'r:{user}:{coll}:{rec}:'.format(user=old_user, coll=old_coll, rec=rec)
             print('    Processing Recording: ' + rec)
-            recording = self.migrate_recording(collection, rec, old_rec_base_key)
+            recording, size = self.migrate_recording(collection, rec, old_rec_base_key)
+
+            total_size += size
 
             # track patch recordings
             if recording and recording.get_prop('rec_type') == 'patch':
@@ -158,9 +168,12 @@ class Migration(object):
                 id_ = self.old_redis.hget(old_rec_base_key + 'info', 'id')
                 patch_recordings[id_] = recording
 
+
+        collection.set_prop('size', total_size, update_ts=False)
+
         # map source to patch recordings, if any
         if not patch_recordings:
-            return
+            return total_size
 
         all_recordings = collection.get_recordings()
         for recording in all_recordings:
@@ -172,7 +185,9 @@ class Migration(object):
             patch_recording = patch_recordings.get(patch_title)
             if patch_recording:
                 print('Patch Mapped ({0}) {1} -> {2}'.format(title, recording.my_id, patch_recording.my_id))
-                recording.set_patch_recording(patch_recording)
+                recording.set_patch_recording(patch_recording, update_ts=False)
+
+        return total_size
 
     def migrate_recording(self, collection, rec, old_rec_base_key):
         # old rec info
@@ -180,7 +195,7 @@ class Migration(object):
 
         if not old_rec_data or not old_rec_data.get('id'):
             print('SKIPPING INVALID: ' + rec)
-            return
+            return None, 0
 
         # get remote archive list
         ra_list = self.old_redis.smembers(old_rec_base_key + 'ra')
@@ -196,18 +211,6 @@ class Migration(object):
 
         print('    New Recording Created: ' + recording.my_id)
 
-        # copy props
-        if 'created_at' in old_rec_data:
-            recording.set_prop('created_at', old_rec_data['created_at'])
-        else:
-            print('    OBJ ERR: created_at missing')
-
-        if 'updated_at' in old_rec_data:
-            recording.set_prop('updated_at', old_rec_data['updated_at'])
-            recording.set_prop('recorded_at', old_rec_data['updated_at'])
-        else:
-            print('    OBJ ERR: updated_at missing')
-
         pages = self.old_redis.hvals(old_rec_base_key + 'page')
         pages = [json.loads(page) for page in pages]
         collection.import_pages(pages, recording)
@@ -215,40 +218,52 @@ class Migration(object):
         # copy files
         warc_files = self.old_redis.hgetall(old_rec_base_key + 'warc')
 
-        self.copy_rec_files(collection.get_owner(), collection, recording, warc_files)
+        total_size = self.copy_rec_files(collection.get_owner(), collection, recording, warc_files)
+
+        recording.set_prop('size', total_size, update_ts=False)
 
         # and list for public pages
         visible_pages = [page for page in pages if page.get('hidden') != '1']
 
-        if not visible_pages:
-            return recording
+        if visible_pages:
+            # shared 'Bookmarks' list
+            if not collection.bookmarks_list:
+                public_desc = 'List automatically created from visible pages on ' + self.datestring()
 
-        # shared 'Bookmarks' list
-        if not collection.bookmarks_list:
-            public_desc = 'List automatically created from visible pages on ' + self.datestring()
+                collection.bookmarks_list = collection.create_bookmark_list(dict(title='Bookmarks',
+                                                                                 desc=public_desc,
+                                                                                 public=True))
+            # per-recording list of public bookmarks
+            if self.per_recording_list:
+                recording_list = collection.create_bookmark_list(dict(title=title,
+                                                                      public=False))
+            else:
+                recording_list = None
 
-            collection.bookmarks_list = collection.create_bookmark_list(dict(title='Bookmarks',
-                                                                             desc=public_desc,
-                                                                             public=True))
-        # per-recording list of public bookmarks
-        if self.per_recording_list:
-            recording_list = collection.create_bookmark_list(dict(title=title,
-                                                                  public=False))
+            # create bookmarks for visible pages
+            for page in visible_pages:
+                #page['rec'] = recording.my_id
+                page['page_id'] = collection._new_page_id(page)
+
+                print('    BOOKMARK: ' + page.get('timestamp', '') + ' ' + page.get('url', ''))
+
+                if recording_list:
+                    bookmark_1 = recording_list.create_bookmark(page)
+                bookmark_2 = collection.bookmarks_list.create_bookmark(page)
+
+        # copy props
+        if 'created_at' in old_rec_data:
+            recording.set_prop('created_at', old_rec_data['created_at'], update_ts=False)
         else:
-            recording_list = None
+            print('    OBJ ERR: created_at missing')
 
-        # create bookmarks for visible pages
-        for page in visible_pages:
-            #page['rec'] = recording.my_id
-            page['page_id'] = collection._new_page_id(page)
+        if 'updated_at' in old_rec_data:
+            recording.set_prop('updated_at', old_rec_data['updated_at'], update_ts=False)
+            recording.set_prop('recorded_at', old_rec_data['updated_at'], update_ts=False)
+        else:
+            print('    OBJ ERR: updated_at missing')
 
-            print('    BOOKMARK: ' + page.get('timestamp', '') + ' ' + page.get('url', ''))
-
-            if recording_list:
-                bookmark_1 = recording_list.create_bookmark(page)
-            bookmark_2 = collection.bookmarks_list.create_bookmark(page)
-
-        return recording
+        return recording, total_size
 
     def copy_rec_files(self, user, collection, recording, warc_files):
         if self.dry_run:
@@ -264,6 +279,7 @@ class Migration(object):
 
         # Copy WARCs
         loader = BlockLoader()
+        total_size = 0
 
         for n, url in warc_files.items():
             if not url.startswith('s3://'):
@@ -285,8 +301,9 @@ class Migration(object):
                 if n != recording.INDEX_FILE_KEY:
                     self.redis.hset(coll_warc_key, n, target_file)
                     self.redis.sadd(rec_warc_key, n)
+                    total_size += size
                 else:
-                    recording.set_prop(n, target_file)
+                    recording.set_prop(n, target_file, update_ts=False)
 
                 if self.dry_run:
                     os.remove(target_file)
@@ -298,6 +315,8 @@ class Migration(object):
         # commit from temp dir to storage
         if not self.dry_run:
             recording.commit_to_storage()
+
+        return total_size
 
     def datestring(self):
         return datetime.datetime.utcnow().isoformat()[:19].replace('T', ' ')
