@@ -12,13 +12,15 @@ import { DragDropContext } from 'react-dnd';
 
 import { isLoaded as isAuthLoaded,
          load as loadAuth } from 'redux/modules/auth';
-import { load as loadUser } from 'redux/modules/user';
 import { load as loadTemp } from 'redux/modules/tempUser';
+import { load as loadUser } from 'redux/modules/user';
+import { showModal } from 'redux/modules/userLogin';
+
 
 import { UserManagement } from 'containers';
 
 import config from 'config';
-import { inStorage, setStorage } from 'helpers/utils';
+import { apiFetch, inStorage, setStorage } from 'helpers/utils';
 
 import BreadcrumbsUI from 'components/siteComponents/BreadcrumbsUI';
 import { Footer } from 'components/siteComponents';
@@ -29,13 +31,14 @@ import './style.scss';
 
 
 // named export for tests
-export class App extends Component { // eslint-disable-line
+export class App extends Component {
 
   static propTypes = {
     auth: PropTypes.object,
+    dispatch: PropTypes.func,
     loaded: PropTypes.bool,
-    route: PropTypes.object,
     location: PropTypes.object,
+    route: PropTypes.object,
     spaceUtilization: PropTypes.object
   }
 
@@ -49,12 +52,14 @@ export class App extends Component { // eslint-disable-line
     const ua = global.navigator ? global.navigator.userAgent : '';
 
     this.handle = null;
+    this.heartbeatHandle = null;
     this.isMobile = Boolean(ua.match(/Mobile|Android|BlackBerry/));
     this.state = {
       error: null,
+      loginStateAlert: false,
       mobileAlert: true,
       outOfSpaceAlert: true,
-      stalled: false
+      stalled: false,
     };
   }
 
@@ -79,6 +84,9 @@ export class App extends Component { // eslint-disable-line
         this.setState({ mobileAlert: false });
       }
     }
+
+    // session heartbeat
+    this.heartbeatHandle = setInterval(this.heartbeat, 1000 * 60 * 10);
   }
 
   componentWillReceiveProps(nextProps) {
@@ -97,6 +105,11 @@ export class App extends Component { // eslint-disable-line
   }
 
   componentDidUpdate(prevProps) {
+    // check if login state changed and logout alert is active
+    if (prevProps.auth.get('loggingIn') && !this.props.auth.get('loggingIn')) {
+      this.setState({ loginStateAlert: false });
+    }
+
     // restore scroll postion
     if (this.props.location !== prevProps.location) {
       clearTimeout(this.handle);
@@ -114,9 +127,12 @@ export class App extends Component { // eslint-disable-line
 
   componentWillUnmount() {
     clearTimeout(this.handle);
+    clearInterval(this.heartbeatHandle);
   }
 
   dismissSpaceAlert = () => this.setState({ outOfSpaceAlert: false })
+
+  dismissLoginAlert = () => this.setState({ loginStateAlert: false })
 
   dismissMobileAlert = () => {
     this.setState({ mobileAlert: false });
@@ -131,6 +147,28 @@ export class App extends Component { // eslint-disable-line
     });
 
     return match;
+  }
+
+  heartbeat = () => {
+    const { auth } = this.props;
+
+    apiFetch('/auth/curr_user')
+      .then(res => res.json())
+      .then((data) => {
+        const user = auth.get('user');
+        if (user.get('anon')) {
+          if (user.get('coll_count') > 0 && user.get('username') !== data.curr_user) {
+            this.setState({ loginStateAlert: true });
+            this.props.dispatch(loadAuth());
+          }
+        } else if (user.get('username') !== data.curr_user) {
+          this.setState({ loginStateAlert: true });
+        }
+      });
+  }
+
+  showLogin = () => {
+    this.props.dispatch(showModal(true));
   }
 
   componentDidCatch(error, info) {
@@ -201,6 +239,12 @@ export class App extends Component { // eslint-disable-line
           this.isMobile && this.state.mobileAlert &&
             <Alert className="mobile-alert" onDismiss={this.dismissMobileAlert}>
               Please note: Webrecorder doesn't currently support mobile devices.
+            </Alert>
+        }
+        {
+          this.state.loginStateAlert &&
+            <Alert className="not-logged-in" onDismiss={this.dismissLoginAlert}>
+              You have been logged out. Please <button className="button-link" onClick={this.showLogin}>log in</button> to continue.
             </Alert>
         }
         {
