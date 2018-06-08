@@ -11,7 +11,7 @@ import { Button } from 'react-bootstrap';
 
 import config from 'config';
 
-import { setSort } from 'redux/modules/collection';
+import { setSort } from 'store/modules/collection';
 import { getCollectionLink, getListLink, getStorage, inStorage, setStorage, range } from 'helpers/utils';
 
 import { CollectionFilters, CollectionHeader, InspectorPanel,
